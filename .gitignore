@@ -1,2 +1,11 @@
 # Client secret token
 secret
+
+# Python installation
+bin/
+include/
+lib/
+lib64/
+lib64
+share/
+pyvenv.cfg
