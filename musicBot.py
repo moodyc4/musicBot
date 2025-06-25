@@ -1,8 +1,8 @@
-#!/usr/bin/python3
+#!/opt/discord/musicBot/bin/python3
 import discord
 from discord.ext import commands, tasks
 from discord.voice_client import VoiceClient
-import yt_dlp
+from yt_dlp import YoutubeDL
 import asyncio
 import re
 
@@ -11,30 +11,25 @@ intents=discord.Intents.default()
 intents.message_content = True
 client = commands.Bot(intents=intents, command_prefix = '\'')
 
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    #'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    #'restrictfilenames': True,
-    #'noplaylist': False,
+ydl_opts = {
+    'format': 'ogg/webm/bestaudio/best',
     'nocheckcertificate': True,
-    'ignoreerrors': False,
+    'ignoreerrors': True,
     'logtostderr': False,
     'quiet': True,
-    #'extract_flat': 'in_playlist',
     'no_warnings': True,
-    'default_search': 'ytsearch',
-    'source_address': '0.0.0.0' # bind to ipv4 since ipv6 addresses cause issues sometimes
+    'default_search': 'auto',
+    'client': 'tv',
 }
 
-ffmpeg_options = {
+ffmpeg_opts = {
     'options': '-vn'
 }
 
-global q
 q = []
-status = "Palworld"
-# YTDL Object
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+requests = []
+status = "Project Zomboid"
+ytdl = YoutubeDL(ydl_opts)
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -47,29 +42,11 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     async def from_url(cls, url, *, loop=None):
-        global q
-        try:
-            with ytdl:
-                loop = loop or asyncio.get_event_loop()
-                data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-                
-                realURL = data.get('url')
-        except:
-            print('This nigga shat himself')
-        
-        if 'entries' in data:
-            # add playlist to queue
-            no = 0
-            vid = data['entries']
-            for i, item in enumerate(vid):
-                vid = data['entries'][i]
-                if (no > 0):
-                    q.append(vid['original_url'])
-                else:
-                    realURL = vid['url']
-                no = no + 1
+        with ytdl:
+            loop = loop or asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
             
-        return cls(discord.FFmpegPCMAudio(realURL, **ffmpeg_options), data=data)
+        return cls(discord.FFmpegPCMAudio(url, **ffmpeg_opts), data=data)
 
 def is_connected(ctx):
     voice_client = ctx.message.guild.voice_client
@@ -84,11 +61,10 @@ async def on_ready():
     print('Music Bot Online.')
 
 @client.command(aliases=['p', 'a', 'add'], help="Start the queue or add a song to the queue and play immediately")
-async def play(ctx, *, url=""):
-    global q
+async def play(ctx, *, request=""):
     server = ctx.message.guild
     voice_channel = server.voice_client
-    # Join voice channel
+    # Join voice channel if necessary
     if not ctx.message.author.voice:
         await ctx.send("You are not connected to a voice channel.")
         return
@@ -98,21 +74,43 @@ async def play(ctx, *, url=""):
             await channel.connect()
         except: 
             pass
-    # Take url, fix short link if necessary + add to queue
-    if url:
-        newURL = ""
-        isShort = re.search(r'shorts', url)
-        if(isShort):
-            newURL = url.replace('/shorts/', '/watch?v=')
-            url = newURL
-        q.append(url)
-        await ctx.send(f'`{url}` added to the queue')
-    elif not url:
+    
+    if request:
+        await ctx.send("**Processing...**")
+
+        # Get data from ytdl
+        with ytdl:
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(request, download=False))
+
+        # If request has a playlist header
+        if 'entries' in data:
+            for video in data["entries"]:
+                if not video:
+                    print("ERROR: Unable to get info. Continuing...")
+                    await ctx.send("Can't play this video...  *Is it age restricted?*")
+                    continue
+                newReq = []
+                for prop in ['url', 'fulltitle', 'uploader_id', 'original_url']:
+                    newReq.append(str(video.get(prop)))
+                await ctx.send('> *Adding* `{0}` [{1}]({2}) *to queue*'.format(newReq[2], newReq[1], newReq[3]))
+                q.append(newReq)
+        # If request is not a playlist (or no playlist header)
+        else:
+            newReq = [
+                data.get('url'),
+                data.get('fulltitle'),
+                data.get('uploader_id'),
+                data.get('original_url')
+            ]
+            await ctx.send('> *Adding* `{0}` [{1}]({2}) *to queue*'.format(newReq[2], newReq[1], newReq[3]))
+            q.append(newReq)
+    elif not request:
         if len(q) == 0:
             await ctx.send('The queue is empty.')
         else:
             pass
-    # While queue is not empty, pass url to ytdl and play
+    # While queue is not empty, pass url to ydl and play
     while q:
         try:
             while voice_channel.is_playing() or voice_channel.is_paused():
@@ -120,17 +118,21 @@ async def play(ctx, *, url=""):
                 pass
         except AttributeError:
             pass
+        # Try to play the video
+        url = str(q[0][0])
+        video_link = str(q[0][3])
+        title = str(q[0][1])
+        author = str(q[0][2])
         try:
             vc = ctx.voice_client
-            #print(client.loop)
-            source = await YTDLSource.from_url(q[0], loop=client.loop)
+            source = await YTDLSource.from_url(url, loop=client.loop)
             vc.play(source)
-            #play(player, after=lambda e: print('Player error: %s' % e) if e else None)
+            await ctx.send('**Now Playing:** `{0}` [{1}]({2})'.format(author, title, video_link))
         except:
-            print('Player shat itself')
+            print('Huh?')
             break
+        
         del(q[0])
-        await ctx.send('**Now Playing:** {}'.format(source.title))
 
 @client.command(aliases=['j'])
 async def join(ctx):
@@ -190,7 +192,13 @@ async def stop(ctx):
 async def queue(ctx):
     global q
     if not q==[]:
-        await ctx.send(f'Current queue: `{q}`')
+        ph = []
+        for item in q:
+            title = item[1]
+            author = item[2]
+            video_link = item[3]
+            ph.append('`{0}` [{1}]({2})'.format(author, title, video_link))
+        await ctx.send(f'> **Current queue:** {ph}')
     else:
         await ctx.send("The queue is empty!")
 
